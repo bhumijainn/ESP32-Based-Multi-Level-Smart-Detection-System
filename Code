@@ -1,0 +1,372 @@
+#include <Arduino.h>
+
+// Pin Definitions
+const int HEAD_IR_PIN = 34;
+const int TIP_IR_PIN = 35;
+
+// Ultrasonic Sensors
+const int US_CENTER_TRIG = 5;
+const int US_CENTER_ECHO = 18;
+const int US_LEFT_TRIG = 17;
+const int US_LEFT_ECHO = 16;
+const int US_RIGHT_TRIG = 19;
+const int US_RIGHT_ECHO = 21;
+
+// Haptic Motors
+const int MOTOR_LEFT = 25;
+const int MOTOR_CENTER = 26;
+const int MOTOR_RIGHT = 27;
+
+// SOS System
+const int SOS_BUTTON = 4;
+const int BUZZER_PIN = 12;
+
+// Buzzer frequencies
+#define SOS_HIGH_FREQ 2000
+#define SOS_LOW_FREQ  1000
+
+// Thresholds (Calibrate these based on your sensors)
+const int HEAD_OBSTACLE_THRESHOLD = 500;    // Higher value = closer object
+const int TIP_DROP_THRESHOLD = 800;         // Higher value = hole/drop
+const int TIP_STEP_THRESHOLD = 200;         // Lower value = step up
+const int US_URGENT_DISTANCE = 40;          // 40 cm - urgent stop
+const int US_OBSTACLE_DISTANCE = 100;       // 100 cm - regular obstacle
+
+// Battery Optimization
+const unsigned long SAMPLE_INTERVAL = 100;  // ms between sensor readings
+const unsigned long DEEP_SLEEP_TIMEOUT = 300000; // 5 minutes inactivity
+unsigned long lastActivityTime = 0;
+bool systemActive = false;
+
+// Motor patterns
+enum MotorPattern {
+  PATTERN_NONE,
+  PATTERN_LEFT_OBSTACLE,
+  PATTERN_RIGHT_OBSTACLE,
+  PATTERN_CENTER_OBSTACLE,
+  PATTERN_URGENT_STOP,
+  PATTERN_DROP_DETECTED,
+  PATTERN_STEP_UP_DETECTED
+};
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Initialize sensor pins
+  pinMode(HEAD_IR_PIN, INPUT);
+  pinMode(TIP_IR_PIN, INPUT);
+  
+  // Initialize ultrasonic pins
+  pinMode(US_CENTER_TRIG, OUTPUT);
+  pinMode(US_CENTER_ECHO, INPUT);
+  pinMode(US_LEFT_TRIG, OUTPUT);
+  pinMode(US_LEFT_ECHO, INPUT);
+  pinMode(US_RIGHT_TRIG, OUTPUT);
+  pinMode(US_RIGHT_ECHO, INPUT);
+  
+  // Initialize motor pins
+  pinMode(MOTOR_LEFT, OUTPUT);
+  pinMode(MOTOR_CENTER, OUTPUT);
+  pinMode(MOTOR_RIGHT, OUTPUT);
+  digitalWrite(MOTOR_LEFT, LOW);
+  digitalWrite(MOTOR_CENTER, LOW);
+  digitalWrite(MOTOR_RIGHT, LOW);
+  
+  // Initialize SOS system
+  pinMode(SOS_BUTTON, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+  noTone(BUZZER_PIN); // Ensure buzzer is off
+  
+  lastActivityTime = millis();
+  
+  Serial.println(" Smart Cane System Initialized");
+  Serial.println(" Sensor Monitoring Started...");
+}
+
+long readUltrasonic(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+  
+  long duration = pulseIn(echoPin, HIGH, 30000); // 30ms timeout
+  if (duration == 0) return 400; // No echo received
+  
+  long distance = duration * 0.034 / 2;
+  return (distance <= 0 || distance > 400) ? 400 : distance;
+}
+
+int readIRSensor(int pin) {
+  // Read analog IR sensor (higher value = closer object)
+  return analogRead(pin);
+}
+
+void stopAllMotors() {
+  digitalWrite(MOTOR_LEFT, LOW);
+  digitalWrite(MOTOR_CENTER, LOW);
+  digitalWrite(MOTOR_RIGHT, LOW);
+}
+
+void activateMotorPattern(MotorPattern pattern) {
+  systemActive = true;
+  lastActivityTime = millis();
+  
+  stopAllMotors(); // Ensure all motors are off before starting new pattern
+  
+  switch(pattern) {
+    case PATTERN_LEFT_OBSTACLE:
+      Serial.println(" Obstacle on LEFT");
+      // Two sharp pulses: buzz - buzz ... pause ... buzz - buzz
+      for(int i = 0; i < 2; i++) {
+        digitalWrite(MOTOR_LEFT, HIGH);
+        delay(100);
+        digitalWrite(MOTOR_LEFT, LOW);
+        delay(100);
+        digitalWrite(MOTOR_LEFT, HIGH);
+        delay(100);
+        digitalWrite(MOTOR_LEFT, LOW);
+        delay(500);
+      }
+      break;
+      
+    case PATTERN_RIGHT_OBSTACLE:
+      Serial.println(" Obstacle on RIGHT");
+      // Two sharp pulses: buzz - buzz ... pause ... buzz - buzz
+      for(int i = 0; i < 2; i++) {
+        digitalWrite(MOTOR_RIGHT, HIGH);
+        delay(100);
+        digitalWrite(MOTOR_RIGHT, LOW);
+        delay(100);
+        digitalWrite(MOTOR_RIGHT, HIGH);
+        delay(100);
+        digitalWrite(MOTOR_RIGHT, LOW);
+        delay(500);
+      }
+      break;
+      
+    case PATTERN_CENTER_OBSTACLE:
+      Serial.println(" Obstacle AHEAD");
+      // Repeating strong pulse: BUZZ ... BUZZ ... BUZZ
+      for(int i = 0; i < 3; i++) {
+        digitalWrite(MOTOR_CENTER, HIGH);
+        delay(300);
+        digitalWrite(MOTOR_CENTER, LOW);
+        delay(300);
+      }
+      break;
+      
+    case PATTERN_URGENT_STOP:
+      Serial.println(" URGENT STOP!");
+      // Continuous intense vibration on all motors
+      for(int i = 0; i < 10; i++) {
+        digitalWrite(MOTOR_LEFT, HIGH);
+        digitalWrite(MOTOR_CENTER, HIGH);
+        digitalWrite(MOTOR_RIGHT, HIGH);
+        delay(100);
+        digitalWrite(MOTOR_LEFT, LOW);
+        digitalWrite(MOTOR_CENTER, LOW);
+        digitalWrite(MOTOR_RIGHT, LOW);
+        delay(100);
+      }
+      break;
+      
+    case PATTERN_DROP_DETECTED:
+      Serial.println(" DROP detected!");
+      // Sequential filling pulse: Left -> Center -> Right
+      digitalWrite(MOTOR_LEFT, HIGH);
+      delay(150);
+      digitalWrite(MOTOR_LEFT, LOW);
+      digitalWrite(MOTOR_CENTER, HIGH);
+      delay(150);
+      digitalWrite(MOTOR_CENTER, LOW);
+      digitalWrite(MOTOR_RIGHT, HIGH);
+      delay(150);
+      digitalWrite(MOTOR_RIGHT, LOW);
+      break;
+      
+    case PATTERN_STEP_UP_DETECTED:
+      Serial.println(" STEP UP detected!");
+      // Single solid simultaneous pulse
+      digitalWrite(MOTOR_LEFT, HIGH);
+      digitalWrite(MOTOR_CENTER, HIGH);
+      digitalWrite(MOTOR_RIGHT, HIGH);
+      delay(300);
+      digitalWrite(MOTOR_LEFT, LOW);
+      digitalWrite(MOTOR_CENTER, LOW);
+      digitalWrite(MOTOR_RIGHT, LOW);
+      break;
+      
+    default:
+      break;
+  }
+  
+  stopAllMotors(); // Ensure all motors are off after pattern
+}
+
+void playSOSPattern() {
+  // S.O.S. Morse Code: ... --- ...
+  
+  // Three short beeps (S)
+  tone(BUZZER_PIN, SOS_HIGH_FREQ);
+  delay(200);
+  noTone(BUZZER_PIN);
+  delay(100);
+  tone(BUZZER_PIN, SOS_HIGH_FREQ);
+  delay(200);
+  noTone(BUZZER_PIN);
+  delay(100);
+  tone(BUZZER_PIN, SOS_HIGH_FREQ);
+  delay(200);
+  noTone(BUZZER_PIN);
+  delay(300);
+  
+  // Three long beeps (O)
+  tone(BUZZER_PIN, SOS_LOW_FREQ);
+  delay(500);
+  noTone(BUZZER_PIN);
+  delay(100);
+  tone(BUZZER_PIN, SOS_LOW_FREQ);
+  delay(500);
+  noTone(BUZZER_PIN);
+  delay(100);
+  tone(BUZZER_PIN, SOS_LOW_FREQ);
+  delay(500);
+  noTone(BUZZER_PIN);
+  delay(300);
+  
+  // Three short beeps (S)
+  tone(BUZZER_PIN, SOS_HIGH_FREQ);
+  delay(200);
+  noTone(BUZZER_PIN);
+  delay(100);
+  tone(BUZZER_PIN, SOS_HIGH_FREQ);
+  delay(200);
+  noTone(BUZZER_PIN);
+  delay(100);
+  tone(BUZZER_PIN, SOS_HIGH_FREQ);
+  delay(200);
+  noTone(BUZZER_PIN);
+  delay(500);
+}
+
+void activateSOS() {
+  Serial.println(" SOS ACTIVATED! ");
+  systemActive = true;
+  lastActivityTime = millis();
+  
+  // Also activate all motors briefly to alert user
+  digitalWrite(MOTOR_LEFT, HIGH);
+  digitalWrite(MOTOR_CENTER, HIGH);
+  digitalWrite(MOTOR_RIGHT, HIGH);
+  delay(1000);
+  stopAllMotors();
+  
+  // Activate buzzer for 1 minute with SOS pattern
+  unsigned long startTime = millis();
+  while(millis() - startTime < 60000) {
+    playSOSPattern();
+    
+    // Check if button is released (optional cancel)
+    if(digitalRead(SOS_BUTTON) == HIGH) {
+      Serial.println("SOS Cancelled");
+      break;
+    }
+  }
+  noTone(BUZZER_PIN); // Ensure buzzer is silent after SOS
+}
+
+void checkSOS() {
+  if(digitalRead(SOS_BUTTON) == LOW) {
+    delay(50); // Debounce
+    if(digitalRead(SOS_BUTTON) == LOW) {
+      activateSOS();
+      // Wait for button release
+      while(digitalRead(SOS_BUTTON) == LOW) {
+        delay(10);
+      }
+    }
+  }
+}
+
+void checkSensors() {
+  // Read ultrasonic sensors
+  long centerDist = readUltrasonic(US_CENTER_TRIG, US_CENTER_ECHO);
+  long leftDist = readUltrasonic(US_LEFT_TRIG, US_LEFT_ECHO);
+  long rightDist = readUltrasonic(US_RIGHT_TRIG, US_RIGHT_ECHO);
+  
+  // Read IR sensors
+  int headIR = readIRSensor(HEAD_IR_PIN);
+  int tipIR = readIRSensor(TIP_IR_PIN);
+  
+  // Debug sensor readings (optional)
+  /*
+  Serial.print("US: L=");
+  Serial.print(leftDist);
+  Serial.print(" C=");
+  Serial.print(centerDist);
+  Serial.print(" R=");
+  Serial.print(rightDist);
+  Serial.print(" | IR: Head=");
+  Serial.print(headIR);
+  Serial.print(" Tip=");
+  Serial.println(tipIR);
+  */
+  
+  // Check for urgent proximity (highest priority)
+  if(centerDist <= US_URGENT_DISTANCE || leftDist <= US_URGENT_DISTANCE || rightDist <= US_URGENT_DISTANCE) {
+    activateMotorPattern(PATTERN_URGENT_STOP);
+    return;
+  }
+  
+  // Check head-level obstacles (IR sensor)
+  if(headIR > HEAD_OBSTACLE_THRESHOLD) {
+    activateMotorPattern(PATTERN_CENTER_OBSTACLE);
+    return;
+  }
+  
+  // Check ground hazards (Tip IR sensor)
+  if(tipIR > TIP_DROP_THRESHOLD) {
+    activateMotorPattern(PATTERN_DROP_DETECTED);
+    return;
+  } else if(tipIR < TIP_STEP_THRESHOLD) {
+    activateMotorPattern(PATTERN_STEP_UP_DETECTED);
+    return;
+  }
+  
+  // Check directional obstacles
+  if(leftDist <= US_OBSTACLE_DISTANCE && leftDist < centerDist && leftDist < rightDist) {
+    activateMotorPattern(PATTERN_LEFT_OBSTACLE);
+  } else if(rightDist <= US_OBSTACLE_DISTANCE && rightDist < centerDist && rightDist < leftDist) {
+    activateMotorPattern(PATTERN_RIGHT_OBSTACLE);
+  } else if(centerDist <= US_OBSTACLE_DISTANCE) {
+    activateMotorPattern(PATTERN_CENTER_OBSTACLE);
+  }
+}
+
+void enterDeepSleep() {
+  Serial.println(" Entering deep sleep to save battery...");
+  
+  // Turn off all outputs
+  stopAllMotors();
+  noTone(BUZZER_PIN);
+  
+  // Configure wake-up sources
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)SOS_BUTTON, LOW);
+  
+  // Enter deep sleep
+  esp_deep_sleep_start();
+}
+
+void loop() {
+  checkSOS();
+  checkSensors();
+  
+  // Battery optimization: Check for inactivity
+  if(systemActive && (millis() - lastActivityTime > DEEP_SLEEP_TIMEOUT)) {
+    systemActive = false;
+    enterDeepSleep();
+  }
+  
+  delay(SAMPLE_INTERVAL);
+}
